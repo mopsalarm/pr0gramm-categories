@@ -1,17 +1,17 @@
+from concurrent.futures import ThreadPoolExecutor
 import random
 import time
 from contextlib import closing
 from operator import itemgetter
+import itertools
+import sqlite3
 
 import datadog
-
 import bottle
 
 import bottle.ext.sqlite
-import itertools
+from cache import cached
 
-
-bottle.install(bottle.ext.sqlite.Plugin(dbfile="pr0gramm-meta.sql"))
 
 datadog.initialize()
 stats = datadog.ThreadStats()
@@ -53,18 +53,33 @@ def unique(items, key_function=id):
             keys.add(key)
 
 
-@bottle.get("/random")
-def feed_random(db):
-    flags = int(bottle.request.params.get("flags", "1"))
-
-    with stats.timer(metric_name("random.request")):
-        max_id, = db.execute("SELECT MAX(id) FROM items").fetchone()
-        items = itertools.chain(
-            query_random_items(db, flags, max_id, promoted=True, count=90),
-            query_random_items(db, flags, max_id, promoted=False, count=30))
+@stats.timed(metric_name("random.update"))
+def generate_item_feed_random(flags):
+    with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
+        db.row_factory = sqlite3.Row
+        with db:
+            max_id, = db.execute("SELECT MAX(id) FROM items").fetchone()
+            items = itertools.chain(
+                query_random_items(db, flags, max_id, promoted=True, count=90),
+                query_random_items(db, flags, max_id, promoted=False, count=30))
 
         items = list(unique(items, itemgetter("id")))
         random.shuffle(items)
+        return items
+
+
+# Use a pool to limit number of concurrent threads
+pool = ThreadPoolExecutor(2)
+
+# Create one cache object for each possible flag value
+cached_random = [cached(pool, generate_item_feed_random, flags) for flags in range(1, 8)]
+
+@bottle.get("/random")
+def feed_random():
+    flags = int(bottle.request.params.get("flags", "1"))
+
+    with stats.timer(metric_name("random.request")):
+        items = cached_random[flags - 1]()
 
     return {
         "atEnd": False,
