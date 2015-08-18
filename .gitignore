@@ -107,4 +107,4 @@ crashlytics-build.properties
 
 
 /.venv
-/pr0gramm-meta.sql
+/pr0gramm-meta.sql*
