@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import random
 import time
 from contextlib import closing
@@ -53,7 +54,6 @@ def unique(items, key_function=id):
             keys.add(key)
 
 
-@stats.timed(metric_name("random.update"))
 def generate_item_feed_random(flags):
     with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
         db.row_factory = sqlite3.Row
@@ -68,20 +68,9 @@ def generate_item_feed_random(flags):
         return items
 
 
-# Use a pool to limit number of concurrent threads
-pool = ThreadPoolExecutor(2)
-
-# Create one cache object for each possible flag value
-cached_random = [cached(pool, generate_item_feed_random, flags) for flags in range(1, 8)]
-
-@bottle.get("/random")
-def feed_random():
-    flags = int(bottle.request.params.get("flags", "1"))
-
-    with stats.timer(metric_name("random.request")):
-        items = cached_random[flags - 1]()
-
-    return {
+@stats.timed(metric_name("random.update"))
+def handle_request_in_background(flags):
+    return json.dumps({
         "atEnd": False,
         "atStart": True,
         "error": None,
@@ -89,6 +78,19 @@ def feed_random():
         "cache": None,
         "rt": 1,
         "qc": 1,
-        "items": items
-    }
+        "items": generate_item_feed_random(flags)
+    })
 
+# Use a pool to limit number of concurrent threads
+pool = ThreadPoolExecutor(2)
+
+# Create one cache object for each possible flag value
+cached_random = [cached(pool, handle_request_in_background, flags) for flags in range(1, 8)]
+
+
+@bottle.get("/random")
+def feed_random_cached():
+    flags = int(bottle.request.params.get("flags", "1"))
+
+    bottle.response.content_type = "application/json"
+    return cached_random[flags - 1]()
