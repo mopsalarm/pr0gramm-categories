@@ -1,5 +1,7 @@
+import functools
 import threading
 
+from functools import partial
 
 class CachedObject(object):
     def __init__(self, executor, worker):
@@ -38,3 +40,12 @@ class CachedObject(object):
 def cached(executor, function, *args, **kwargs):
     cache = CachedObject(executor, lambda: function(*args, **kwargs))
     return cache.get
+
+
+def lru_cache_pool(pool, size):
+    def decorator(func):
+        make_cache = partial(cached, pool, func)
+        cache_pool = functools.lru_cache(size)(make_cache)
+        return functools.wraps(func)(lambda *args: cache_pool(*args)())
+
+    return decorator
