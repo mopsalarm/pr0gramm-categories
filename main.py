@@ -89,6 +89,7 @@ cached_random = [cached(pool, handle_request_in_background, flags) for flags in 
 
 
 @bottle.get("/random")
+@stats.timed(metric_name("random.request"))
 def feed_random_cached():
     flags = int(bottle.request.params.get("flags", "1"))
 
