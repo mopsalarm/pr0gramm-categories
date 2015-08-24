@@ -113,6 +113,7 @@ def feed_random_cached():
     tag_filter = bottle.request.params.getunicode("tags")
 
     if tag_filter:
+        tag_filter = tag_filter.lower().strip()
         stats.increment(metric_name("random.request_tag"))
 
     bottle.response.content_type = "application/json"
