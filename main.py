@@ -1,17 +1,20 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import random
+import threading
 import time
 import itertools
 import sqlite3
-import re
 from contextlib import closing
 from operator import itemgetter
+import traceback
 
 import datadog
-
 import bottle
 
+from first import first
+
+from controversial import update_controversial
 from cache import lru_cache_pool
 
 
@@ -91,18 +94,75 @@ def generate_item_feed_random(flags, tags):
         return items
 
 
-@lru_cache_pool(ThreadPoolExecutor(4), 256)
+def start_update_controversial_thread():
+    update_item_count = None
+
+    def update():
+        nonlocal update_item_count
+        print("Updating controversial category now")
+        with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
+            update_controversial(db, update_item_count, vote_count=60, similarity=0.6)
+            update_item_count = 1000
+
+            count = first(db.execute("SELECT COUNT(*) FROM controversial").fetchone())
+            print("Got {} items in controversial table".format(count))
+
+    def loop():
+        while True:
+            # noinspection PyBroadException
+            try:
+                update()
+            except:
+                traceback.print_exc()
+
+            time.sleep(30)
+
+    print("Starting controversial-category update thread now")
+    threading.Thread(target=loop).start()
+
+
+def generate_item_feed_controversial(flags, older):
+    clauses = []
+
+    clauses += ["items.flags IN (%s)" % ",".join(str(flag) for flag in explode_flags(flags))]
+
+    if older and older > 0:
+        clauses += ["items.id<%d" % older]
+
+    query = """
+        SELECT items.* FROM items
+          JOIN controversial ON items.id=controversial.item_id
+        WHERE %s
+        ORDER BY controversial.id DESC LIMIT 120""" % " AND ".join(clauses)
+
+    with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
+        db.row_factory = sqlite3.Row
+        items = [dict(item) for item in db.execute(query)]
+
+    return len(items) < 120, items
+
+
+thread_pool = ThreadPoolExecutor(4)
+
+
+@lru_cache_pool(thread_pool, 256)
 @stats.timed(metric_name("random.update"))
-def process_request(flags, tags=None):
+def process_request_random(flags, tags=None):
     return json.dumps({
-        "atEnd": False,
-        "atStart": True,
-        "error": None,
+        "items": generate_item_feed_random(flags, tags),
         "ts": time.time(),
-        "cache": None,
-        "rt": 1,
-        "qc": 1,
-        "items": generate_item_feed_random(flags, tags)
+        "atEnd": False, "atStart": True, "error": None, "cache": None, "rt": 1, "qc": 1
+    })
+
+
+@lru_cache_pool(thread_pool, 32)
+@stats.timed(metric_name("controversial.update"))
+def process_request_controversial(flags, older=None):
+    at_end, items = generate_item_feed_controversial(flags, older)
+    return json.dumps({
+        "items": items,
+        "ts": time.time(),
+        "atEnd": at_end, "atStart": True, "error": None, "cache": None, "rt": 1, "qc": 1
     })
 
 
@@ -117,8 +177,21 @@ def feed_random_cached():
         stats.increment(metric_name("random.request_tag"))
 
     bottle.response.content_type = "application/json"
-    return process_request(flags, tag_filter)
+    return process_request_random(flags, tag_filter)
+
+
+@bottle.get("/controversial")
+@stats.timed(metric_name("controversial.request"))
+def feed_controversial_cached():
+    flags = int(bottle.request.params.get("flags", "1"))
+    older_than = int(bottle.request.params.get("older", "0"))
+
+    bottle.response.content_type = "application/json"
+    return process_request_controversial(flags, older_than)
 
 
 # preload cache
-[process_request(flags) for flags in range(1, 8)]
+[process_request_random(flags) for flags in range(1, 8)]
+
+# update the controversial category in the background
+start_update_controversial_thread()
