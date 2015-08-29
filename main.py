@@ -101,7 +101,7 @@ def start_update_controversial_thread():
         nonlocal update_item_count
         print("Updating controversial category now")
         with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
-            update_controversial(db, update_item_count, vote_count=60, similarity=0.6)
+            update_controversial(db, update_item_count, vote_count=60, similarity=0.7)
             update_item_count = 1000
 
             count = first(db.execute("SELECT COUNT(*) FROM controversial").fetchone())
@@ -132,14 +132,15 @@ def generate_item_feed_controversial(flags, older):
     query = """
         SELECT items.* FROM items
           JOIN controversial ON items.id=controversial.item_id
-        WHERE %s
+        WHERE %s AND items.id NOT IN (
+          SELECT tags.item_id FROM tags WHERE tags.item_id=items.id AND tags.confidence>0.3 AND tag='repost')
         ORDER BY controversial.id DESC LIMIT 120""" % " AND ".join(clauses)
 
     with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
         db.row_factory = sqlite3.Row
         items = [dict(item) for item in db.execute(query)]
 
-    return len(items) < 120, items
+    return len(items) == 0, items
 
 
 thread_pool = ThreadPoolExecutor(4)
