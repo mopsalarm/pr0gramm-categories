@@ -140,7 +140,7 @@ def generate_item_feed_controversial(flags, older):
         db.row_factory = sqlite3.Row
         items = [dict(item) for item in db.execute(query)]
 
-    return len(items) == 0, items
+    return len(items) < 120, items
 
 
 thread_pool = ThreadPoolExecutor(4)
