@@ -133,7 +133,7 @@ def generate_item_feed_controversial(flags, older):
         SELECT items.* FROM items
           JOIN controversial ON items.id=controversial.item_id
         WHERE %s AND items.id NOT IN (
-          SELECT tags.item_id FROM tags WHERE tags.item_id=items.id AND tags.confidence>0.3 AND tag='repost')
+          SELECT tags.item_id FROM tags WHERE tags.item_id=items.id AND tags.confidence>0.3 AND tag='repost' COLLATE nocase)
         ORDER BY controversial.id DESC LIMIT 120""" % " AND ".join(clauses)
 
     with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
