@@ -40,6 +40,14 @@ def explode_flags(flags):
     return [flag for flag in (1, 2, 4) if flags & flag]
 
 
+def fix_username_column(value):
+    if "username" in value and "user" not in value:
+        value = value.copy()
+        value["user"] = value.pop("username")
+
+    return value
+
+
 def query_random_items(cursor, flags, max_id, tags, promoted, count):
     q_flags = ",".join(str(flag) for flag in explode_flags(flags))
     q_promoted = "!=" if promoted else "="
@@ -73,7 +81,7 @@ def query_random_items(cursor, flags, max_id, tags, promoted, count):
         # yield the results!
         for item in items:
             min_possible_result = item["id"]
-            yield item
+            yield fix_username_column(item)
 
 
 def unique(items, key_function=id):
@@ -144,7 +152,7 @@ def generate_item_feed_controversial(flags, older):
 
     with database, database.cursor() as cursor:
         cursor.execute(query)
-        items = [dict(item) for item in cursor]
+        items = [fix_username_column(item) for item in cursor]
 
     return len(items) < 120, items
 
@@ -160,7 +168,7 @@ def generate_item_feed_bestof(flags, older_than, min_score):
 
     with database, database.cursor() as cursor:
         cursor.execute(query)
-        items = [dict(item) for item in cursor]
+        items = [fix_username_column(item) for item in cursor]
 
     return len(items) < 120, items
 
