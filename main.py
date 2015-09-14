@@ -1,26 +1,32 @@
 from concurrent.futures import ThreadPoolExecutor
+import itertools
 import json
+from operator import itemgetter
+import os
 import random
 import threading
 import time
-import itertools
-import sqlite3
-from contextlib import closing
-from operator import itemgetter
 import traceback
 
-import datadog
 import bottle
-
+import datadog
 from first import first
+import psycopg2
+from psycopg2.extras import DictCursor
 
-from controversial import update_controversial
 from cache import lru_cache_pool
+from controversial import update_controversial
 
+CONFIG_POSTGRES_HOST = os.environ["POSTGRES_HOST"]
 
 datadog.initialize()
 stats = datadog.ThreadStats()
 stats.start()
+
+print("open database at", CONFIG_POSTGRES_HOST)
+database = psycopg2.connect(host=CONFIG_POSTGRES_HOST,
+                            user="postgres", password="password", dbname="postgres",
+                            cursor_factory=DictCursor)
 
 
 def metric_name(name):
@@ -34,19 +40,19 @@ def explode_flags(flags):
     return [flag for flag in (1, 2, 4) if flags & flag]
 
 
-def query_random_items(db, flags, max_id, tags, promoted, count):
+def query_random_items(cursor, flags, max_id, tags, promoted, count):
     q_flags = ",".join(str(flag) for flag in explode_flags(flags))
     q_promoted = "!=" if promoted else "="
 
     def query_with_tag(item_id):
-        return db.execute("""SELECT items.*
+        cursor.execute("""SELECT items.*
             FROM items INNER JOIN tags ON items.id=tags.item_id
-            WHERE items.id<=? AND tags.tag=? AND flags IN (%s) AND promoted %s 0
+            WHERE items.id<=%%s AND tags.tag=%%s AND flags IN (%s) AND promoted %s 0
             ORDER BY items.id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id, tags))
 
     def query_simple(item_id):
-        return db.execute("""SELECT * FROM items
-            WHERE id<=? AND flags IN (%s) AND promoted %s 0
+        cursor.execute("""SELECT * FROM items
+            WHERE id<=%%s AND flags IN (%s) AND promoted %s 0
             ORDER BY id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id,))
 
     random_item_ids = sorted({random.randint(0, max_id) for _ in range(count)}, reverse=True)
@@ -57,9 +63,8 @@ def query_random_items(db, flags, max_id, tags, promoted, count):
             continue
 
         # now perform the query
-        query = query_with_tag if tags else query_simple
-        with closing(query(rid)) as cursor:
-            items = [dict(item) for item in cursor.fetchall()]
+        (query_with_tag if tags else query_simple)(rid)
+        items = [dict(item) for item in cursor]
 
         # stop if we haven't found anything with a smaller id than this
         if not items:
@@ -81,17 +86,17 @@ def unique(items, key_function=id):
 
 
 def generate_item_feed_random(flags, tags):
-    with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
-        db.row_factory = sqlite3.Row
-        with db:
-            max_id, = db.execute("SELECT MAX(id) FROM items").fetchone()
-            items = itertools.chain(
-                query_random_items(db, flags, max_id, tags, promoted=True, count=90),
-                query_random_items(db, flags, max_id, tags, promoted=False, count=30))
+    with database, database.cursor() as cursor:
+        cursor.execute("SELECT MAX(id) FROM items")
+        max_id, = cursor.fetchone()
+        items = itertools.chain(
+            query_random_items(cursor, flags, max_id, tags, promoted=True, count=90),
+            query_random_items(cursor, flags, max_id, tags, promoted=False, count=30))
 
         items = list(unique(items, itemgetter("id")))
-        random.shuffle(items)
-        return items
+
+    random.shuffle(items)
+    return items
 
 
 def start_update_controversial_thread():
@@ -100,11 +105,14 @@ def start_update_controversial_thread():
     def update():
         nonlocal update_item_count
         print("Updating controversial category now")
-        with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
-            update_controversial(db, update_item_count, vote_count=60, similarity=0.7)
+        with database, database.cursor() as cursor:
+            with stats.timer(metric_name("controversial.rate")):
+                update_controversial(database, update_item_count, vote_count=60, similarity=0.7)
+
             update_item_count = 1000
 
-            count = first(db.execute("SELECT COUNT(*) FROM controversial").fetchone())
+            cursor.execute("SELECT COUNT(*) FROM controversial")
+            count = first(cursor.fetchone())
             print("Got {} items in controversial table".format(count))
 
     def loop():
@@ -115,16 +123,14 @@ def start_update_controversial_thread():
             except:
                 traceback.print_exc()
 
-            time.sleep(30)
+            time.sleep(120)
 
     print("Starting controversial-category update thread now")
-    threading.Thread(target=loop).start()
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def generate_item_feed_controversial(flags, older):
-    clauses = []
-
-    clauses += ["items.flags IN (%s)" % ",".join(str(flag) for flag in explode_flags(flags))]
+    clauses = ["items.flags IN (%s)" % ",".join(str(flag) for flag in explode_flags(flags))]
 
     if older and older > 0:
         clauses += ["items.id<%d" % older]
@@ -133,12 +139,28 @@ def generate_item_feed_controversial(flags, older):
         SELECT items.* FROM items
           JOIN controversial ON items.id=controversial.item_id
         WHERE %s AND items.id NOT IN (
-          SELECT tags.item_id FROM tags WHERE tags.item_id=items.id AND tags.confidence>0.3 AND tag='repost' COLLATE nocase)
+          SELECT tags.item_id FROM tags WHERE tags.item_id=items.id AND tags.confidence>0.3 AND lower(tag)='repost')
         ORDER BY controversial.id DESC LIMIT 120""" % " AND ".join(clauses)
 
-    with closing(sqlite3.connect("pr0gramm-meta.sqlite3")) as db:
-        db.row_factory = sqlite3.Row
-        items = [dict(item) for item in db.execute(query)]
+    with database, database.cursor() as cursor:
+        cursor.execute(query)
+        items = [dict(item) for item in cursor]
+
+    return len(items) < 120, items
+
+
+def generate_item_feed_bestof(flags, older_than, min_score):
+    clauses = ["items.flags IN (%s)" % ",".join(str(flag) for flag in explode_flags(flags))]
+
+    if older_than and older_than > 0:
+        clauses += ["items.id<%d" % older_than]
+
+    query = "SELECT * FROM items WHERE %s AND up-down>=%s ORDER BY id DESC LIMIT 120" % \
+            (" AND ".join(clauses), int(min_score))
+
+    with database, database.cursor() as cursor:
+        cursor.execute(query)
+        items = [dict(item) for item in cursor]
 
     return len(items) < 120, items
 
@@ -160,6 +182,15 @@ def process_request_random(flags, tags=None):
 @stats.timed(metric_name("controversial.update"))
 def process_request_controversial(flags, older=None):
     at_end, items = generate_item_feed_controversial(flags, older)
+    return json.dumps({
+        "items": items,
+        "ts": time.time(),
+        "atEnd": at_end, "atStart": True, "error": None, "cache": None, "rt": 1, "qc": 1
+    })
+
+
+def process_request_bestof(flags, older_than, min_score):
+    at_end, items = generate_item_feed_bestof(flags, older_than, min_score)
     return json.dumps({
         "items": items,
         "ts": time.time(),
@@ -189,6 +220,17 @@ def feed_controversial_cached():
 
     bottle.response.content_type = "application/json"
     return process_request_controversial(flags, older_than)
+
+
+@bottle.get("/bestof")
+@stats.timed(metric_name("bestof.request"))
+def feed_controversial_cached():
+    flags = int(bottle.request.params.get("flags", "1"))
+    older_than = int(bottle.request.params.get("older", "0"))
+    min_score = int(bottle.request.params.get("score", "1000"))
+
+    bottle.response.content_type = "application/json"
+    return process_request_bestof(flags, older_than, min_score)
 
 
 @bottle.route("/ping")
