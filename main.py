@@ -51,13 +51,13 @@ def query_random_items(cursor, flags, max_id, tags, promoted, count):
     def query_with_tag(item_id):
         cursor.execute("""SELECT items.*
             FROM items INNER JOIN tags ON items.id=tags.item_id
-            WHERE items.id<=%%s AND tags.tag=%%s AND flags IN (%s) AND promoted %s 0
-            ORDER BY items.id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id, tags))
+            WHERE items.id<=%%s AND lower(tags.tag)=%%s AND items.flags IN (%s) AND items.promoted %s 0
+            ORDER BY items.id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id, tags.lower()))
 
     def query_simple(item_id):
         cursor.execute("""SELECT * FROM items
-            WHERE id<=%%s AND flags IN (%s) AND promoted %s 0
-            ORDER BY id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id,))
+            WHERE items.id<=%%s AND items.flags IN (%s) AND items.promoted %s 0
+            ORDER BY items.id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id,))
 
     random_item_ids = sorted({random.randint(0, max_id) for _ in range(count)}, reverse=True)
 
@@ -90,6 +90,7 @@ def unique(items, key_function=id):
 
 
 def generate_item_feed_random(flags, tags):
+    start = time.time()
     with database, database.cursor() as cursor:
         cursor.execute("SELECT MAX(id) FROM items")
         max_id, = cursor.fetchone()
@@ -98,6 +99,8 @@ def generate_item_feed_random(flags, tags):
             query_random_items(cursor, flags, max_id, tags, promoted=False, count=30))
 
         items = list(unique(items, itemgetter("id")))
+
+    print("UPDATE RANDOM", time.time()-start)
 
     random.shuffle(items)
     return items
