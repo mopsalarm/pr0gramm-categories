@@ -4,18 +4,14 @@ import json
 from operator import itemgetter
 import os
 import random
-import threading
 import time
-import traceback
 
 import bottle
 import datadog
-from first import first
 import psycopg2
 from psycopg2.extras import DictCursor
 
 from cache import lru_cache_pool
-from controversial import update_controversial
 
 CONFIG_POSTGRES_HOST = os.environ["POSTGRES_HOST"]
 
@@ -107,36 +103,6 @@ def generate_item_feed_random(flags, tags):
     return items
 
 
-def start_update_controversial_thread():
-    update_item_count = None
-
-    def update():
-        nonlocal update_item_count
-        print("Updating controversial category now")
-        with database, database.cursor() as cursor:
-            with stats.timer(metric_name("controversial.rate")):
-                update_controversial(database, update_item_count, vote_count=60, similarity=0.7)
-
-            update_item_count = 1000
-
-            cursor.execute("SELECT COUNT(*) FROM controversial")
-            count = first(cursor.fetchone())
-            print("Got {} items in controversial table".format(count))
-
-    def loop():
-        while True:
-            # noinspection PyBroadException
-            try:
-                update()
-            except:
-                traceback.print_exc()
-
-            time.sleep(120)
-
-    print("Starting controversial-category update thread now")
-    threading.Thread(target=loop, daemon=True).start()
-
-
 def generate_item_feed_controversial(flags, older):
     clauses = ["items.flags IN (%s)" % ",".join(str(flag) for flag in explode_flags(flags))]
 
@@ -164,6 +130,7 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
     WHERE lower(tags.tag)='süßvieh' AND items_bestof.score > 2000 AND items.flags IN (1, 2)
     LIMIT 120;
     """
+
     def join_as_bytes(*xs, sep=b" "):
         return sep.join((x if isinstance(x, bytes) else x.encode("utf8")) for x in xs)
 
@@ -192,11 +159,8 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
                               "WHERE", join_as_bytes(*where_clauses, sep=b" AND "),
                               "ORDER BY items_bestof.id DESC LIMIT 120")
 
-        print(query)
-        start = time.time()
         cursor.execute(query)
         items = [fix_username_column(item) for item in cursor]
-        print("duration of query:", time.time()-start)
 
     return len(items) < 120, items
 
@@ -225,6 +189,7 @@ def process_request_controversial(flags, older=None):
     })
 
 
+@stats.timed(metric_name("bestof.query"))
 def process_request_bestof(flags, older_than, min_score, tag, user):
     at_end, items = generate_item_feed_bestof(flags, older_than, min_score, tag, user)
     return json.dumps({
@@ -278,6 +243,3 @@ def ping():
 
 # preload cache
 [process_request_random(flags) for flags in range(1, 8)]
-
-# update the controversial category in the background
-start_update_controversial_thread()
