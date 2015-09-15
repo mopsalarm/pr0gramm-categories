@@ -157,18 +157,46 @@ def generate_item_feed_controversial(flags, older):
     return len(items) < 120, items
 
 
-def generate_item_feed_bestof(flags, older_than, min_score):
-    clauses = ["items.flags IN (%s)" % ",".join(str(flag) for flag in explode_flags(flags))]
+def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
+    """
+    SELECT items.* FROM items_bestof
+    JOIN items ON items_bestof.id=items.id JOIN tags ON items_bestof.id=tags.item_id
+    WHERE lower(tags.tag)='süßvieh' AND items_bestof.score > 2000 AND items.flags IN (1, 2)
+    LIMIT 120;
+    """
+    def join_as_bytes(*xs, sep=b" "):
+        return sep.join((x if isinstance(x, bytes) else x.encode("utf8")) for x in xs)
 
-    if older_than and older_than > 0:
-        clauses += ["items.id<%d" % older_than]
+    with database.cursor() as cursor:
+        # parts of the base query.
+        joins = ["JOIN items ON items_bestof.id=items.id"]
+        where_clauses = ["items_bestof.score > %d" % min_score]
 
-    query = "SELECT * FROM items WHERE %s AND up-down>=%s ORDER BY id DESC LIMIT 120" % \
-            (" AND ".join(clauses), int(min_score))
+        if tag:
+            # add tags specific query parts
+            joins += ["JOIN tags ON items_bestof.id=tags.item_id"]
+            where_clauses += [cursor.mogrify("lower(tags.tag)=%s", [tag])]
 
-    with database, database.cursor() as cursor:
+        if flags != 7:
+            # filter flags
+            where_clauses += ["items.flags IN (%s)" % ",".join(map(str, explode_flags(flags)))]
+
+        if user:
+            where_clauses += [cursor.mogrify("lower(items.username)=%s", [user.lower()])]
+
+        if older_than and older_than > 0:
+            where_clauses += ["items_bestof.id<%d" % older_than]
+
+        query = join_as_bytes("SELECT items.* FROM items_bestof",
+                              join_as_bytes(*joins),
+                              "WHERE", join_as_bytes(*where_clauses, sep=b" AND "),
+                              "ORDER BY items_bestof.id DESC LIMIT 120")
+
+        print(query)
+        start = time.time()
         cursor.execute(query)
         items = [fix_username_column(item) for item in cursor]
+        print("duration of query:", time.time()-start)
 
     return len(items) < 120, items
 
@@ -197,8 +225,8 @@ def process_request_controversial(flags, older=None):
     })
 
 
-def process_request_bestof(flags, older_than, min_score):
-    at_end, items = generate_item_feed_bestof(flags, older_than, min_score)
+def process_request_bestof(flags, older_than, min_score, tag, user):
+    at_end, items = generate_item_feed_bestof(flags, older_than, min_score, tag, user)
     return json.dumps({
         "items": items,
         "ts": time.time(),
@@ -236,9 +264,11 @@ def feed_controversial_cached():
     flags = int(bottle.request.params.get("flags", "1"))
     older_than = int(bottle.request.params.get("older", "0"))
     min_score = int(bottle.request.params.get("score", "1000"))
+    tag = bottle.request.params.get("tags")
+    user = bottle.request.params.get("user")
 
     bottle.response.content_type = "application/json"
-    return process_request_bestof(flags, older_than, min_score)
+    return process_request_bestof(flags, older_than, min_score, tag, user)
 
 
 @bottle.route("/ping")
