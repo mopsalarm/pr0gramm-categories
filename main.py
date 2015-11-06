@@ -144,7 +144,7 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
         if tag:
             # add tags specific query parts
             joins += ["JOIN tags ON items_bestof.id=tags.item_id"]
-            query = " & ".join(re.split(r"\s+", tag))
+            query = pg_tsquery(tag)
             where_clauses += [cursor.mogrify("to_tsvector('simple', tags.tag) @@ to_tsquery('simple', %s)", [query])]
 
         if flags != 7:
@@ -166,6 +166,10 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
         items = [fix_username_column(item) for item in cursor]
 
     return len(items) < 120, items
+
+
+def pg_tsquery(tag):
+    return " & ".join(re.split(r"\s+", tag))
 
 
 thread_pool = ThreadPoolExecutor(4)
@@ -205,8 +209,9 @@ def process_request_bestof(flags, older_than, min_score, tag, user):
 @bottle.get("/random")
 @stats.timed(metric_name("random.request"))
 def feed_random_cached():
-    flags = int(bottle.request.params.get("flags", "1"))
-    tag_filter = bottle.request.params.getunicode("tags")
+    params = bottle.request.params.decode("utf8")
+    flags = int(params.get("flags", "1"))
+    tag_filter = params.get("tags")
 
     if tag_filter:
         tag_filter = tag_filter.lower().strip()
@@ -229,11 +234,13 @@ def feed_controversial_cached():
 @bottle.get("/bestof")
 @stats.timed(metric_name("bestof.request"))
 def feed_controversial_cached():
-    flags = int(bottle.request.params.get("flags", "1"))
-    older_than = int(bottle.request.params.get("older", "0"))
-    min_score = int(bottle.request.params.get("score", "1000"))
-    tag = bottle.request.params.get("tags")
-    user = bottle.request.params.get("user")
+    params = bottle.request.params.decode("utf8")
+
+    flags = int(params.get("flags", "1"))
+    older_than = int(params.get("older", "0"))
+    min_score = int(params.get("score", "1000"))
+    tag = params.get("tags")
+    user = params.get("user")
 
     bottle.response.content_type = "application/json"
     return process_request_bestof(flags, older_than, min_score, tag, user)
