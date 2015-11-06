@@ -101,8 +101,6 @@ def generate_item_feed_random(flags, tags):
 
         items = list(unique(items, itemgetter("id")))
 
-    print("UPDATE RANDOM", time.time()-start)
-
     random.shuffle(items)
     return items
 
@@ -159,7 +157,7 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
         if older_than and older_than > 0:
             where_clauses += ["items_bestof.id<%d" % older_than]
 
-        query = join_as_bytes("SELECT items.* FROM items_bestof",
+        query = join_as_bytes("SELECT DISTINCT ON (items_bestof.id) items.* FROM items_bestof",
                               join_as_bytes(*joins),
                               "WHERE", join_as_bytes(*where_clauses, sep=b" AND "),
                               "ORDER BY items_bestof.id DESC LIMIT 120")
