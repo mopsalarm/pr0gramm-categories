@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 import itertools
 import json
@@ -130,14 +131,14 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
     """
     SELECT items.* FROM items_bestof
     JOIN items ON items_bestof.id=items.id JOIN tags ON items_bestof.id=tags.item_id
-    WHERE lower(tags.tag)='süßvieh' AND items_bestof.score > 2000 AND items.flags IN (1, 2)
+    WHERE to_tsvector('simple', tags.tag) @@ to_tsquery('simple', 'hassen & diesen') AND items_bestof.score > 2000 AND items.flags IN (1, 2)
     LIMIT 120;
     """
 
     def join_as_bytes(*xs, sep=b" "):
         return sep.join((x if isinstance(x, bytes) else x.encode("utf8")) for x in xs)
 
-    with database.cursor() as cursor:
+    with database, database.cursor() as cursor:
         # parts of the base query.
         joins = ["JOIN items ON items_bestof.id=items.id"]
         where_clauses = ["items_bestof.score > %d" % min_score]
@@ -145,7 +146,8 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
         if tag:
             # add tags specific query parts
             joins += ["JOIN tags ON items_bestof.id=tags.item_id"]
-            where_clauses += [cursor.mogrify("lower(tags.tag)=%s", [tag])]
+            query = " & ".join(re.split(r"\s+", tag))
+            where_clauses += [cursor.mogrify("to_tsvector('simple', tags.tag) @@ to_tsquery('simple', %s)", [query])]
 
         if flags != 7:
             # filter flags
@@ -245,4 +247,4 @@ def ping():
 
 
 # preload cache
-[process_request_random(flags) for flags in range(1, 8)]
+# [process_request_random(flags) for flags in range(1, 8)]
