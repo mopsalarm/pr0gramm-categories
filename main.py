@@ -211,7 +211,9 @@ def process_request_bestof(flags, older_than, min_score, tag, user):
 def feed_random_cached():
     params = bottle.request.params.decode("utf8")
     flags = int(params.get("flags", "1"))
-    tag_filter = params.get("tags")
+
+    # tag_filter = params.get("tags")
+    tag_filter = None
 
     if tag_filter:
         tag_filter = tag_filter.lower().strip()
@@ -233,14 +235,16 @@ def feed_controversial_cached():
 
 @bottle.get("/bestof")
 @stats.timed(metric_name("bestof.request"))
-def feed_controversial_cached():
+def feed_bestof_cached():
     params = bottle.request.params.decode("utf8")
 
     flags = int(params.get("flags", "1"))
     older_than = int(params.get("older", "0"))
     min_score = int(params.get("score", "1000"))
     tag = params.get("tags")
-    user = params.get("user")
+
+    # user = params.get("user")
+    user = None
 
     bottle.response.content_type = "application/json"
     return process_request_bestof(flags, older_than, min_score, tag, user)
