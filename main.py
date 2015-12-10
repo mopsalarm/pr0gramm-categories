@@ -1,15 +1,15 @@
-import re
-from concurrent.futures import ThreadPoolExecutor
 import itertools
 import json
-from operator import itemgetter
 import os
 import random
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from operator import itemgetter
 
 import bottle
 import datadog
-import psycopg2
+import pcc
 from psycopg2.extras import DictCursor
 
 from cache import lru_cache_pool
@@ -21,9 +21,11 @@ stats = datadog.ThreadStats()
 stats.start()
 
 print("open database at", CONFIG_POSTGRES_HOST)
-database = psycopg2.connect(host=CONFIG_POSTGRES_HOST,
-                            user="postgres", password="password", dbname="postgres",
-                            cursor_factory=DictCursor)
+dbpool = pcc.RefreshingConnectionCache(
+        lifetime=60,
+        host=CONFIG_POSTGRES_HOST,
+        user="postgres", password="password", dbname="postgres",
+        cursor_factory=DictCursor)
 
 
 def metric_name(name):
@@ -92,12 +94,12 @@ def unique(items, key_function=id):
 
 def generate_item_feed_random(flags, tags):
     start = time.time()
-    with database, database.cursor() as cursor:
+    with dbpool.tx() as database, database.cursor() as cursor:
         cursor.execute("SELECT MAX(id) FROM items")
         max_id, = cursor.fetchone()
         items = itertools.chain(
-            query_random_items(cursor, flags, max_id, tags, promoted=True, count=90),
-            query_random_items(cursor, flags, max_id, tags, promoted=False, count=30))
+                query_random_items(cursor, flags, max_id, tags, promoted=True, count=90),
+                query_random_items(cursor, flags, max_id, tags, promoted=False, count=30))
 
         items = list(unique(items, itemgetter("id")))
 
@@ -118,7 +120,7 @@ def generate_item_feed_controversial(flags, older):
           SELECT tags.item_id FROM tags WHERE tags.item_id=items.id AND tags.confidence>0.3 AND lower(tag)='repost')
         ORDER BY controversial.id DESC LIMIT 120""" % " AND ".join(clauses)
 
-    with database, database.cursor() as cursor:
+    with dbpool.tx() as database, database.cursor() as cursor:
         cursor.execute(query)
         items = [fix_username_column(item) for item in cursor]
 
@@ -136,7 +138,7 @@ def generate_item_feed_bestof(flags, older_than, min_score, tag, user):
     def join_as_bytes(*xs, sep=b" "):
         return sep.join((x if isinstance(x, bytes) else x.encode("utf8")) for x in xs)
 
-    with database, database.cursor() as cursor:
+    with dbpool.tx() as database, database.cursor() as cursor:
         # parts of the base query.
         joins = ["JOIN items ON items_bestof.id=items.id"]
         where_clauses = ["items_bestof.score > %d" % min_score]
@@ -253,7 +255,6 @@ def feed_bestof_cached():
 @bottle.route("/ping")
 def ping():
     return
-
 
 # preload cache
 # [process_request_random(flags) for flags in range(1, 8)]
