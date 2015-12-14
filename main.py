@@ -227,6 +227,3 @@ def feed_bestof_cached():
 @bottle.route("/ping")
 def ping():
     return
-
-# preload cache
-# [process_request_random(flags) for flags in range(1, 8)]
