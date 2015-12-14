@@ -1,11 +1,9 @@
-import itertools
 import json
 import os
 import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from operator import itemgetter
 
 import bottle
 import datadog
@@ -18,7 +16,8 @@ CONFIG_POSTGRES_HOST = os.environ["POSTGRES_HOST"]
 
 datadog.initialize()
 stats = datadog.ThreadStats()
-stats.start()
+if datadog.api._api_key:
+    stats.start()
 
 print("open database at", CONFIG_POSTGRES_HOST)
 dbpool = pcc.RefreshingConnectionCache(
@@ -36,10 +35,10 @@ def explode_flags(flags):
     if not 1 <= flags <= 7:
         raise ValueError("flags out of range")
 
-    return [flag for flag in (1, 2, 4) if flags & flag]
+    return tuple(flag for flag in (1, 2, 4) if flags & flag)
 
 
-def fix_username_column(value):
+def fix_username_column(value, copy=True):
     if "username" in value and "user" not in value:
         value = value.copy()
         value["user"] = value.pop("username")
@@ -47,61 +46,41 @@ def fix_username_column(value):
     return value
 
 
-def query_random_items(cursor, flags, max_id, tags, promoted, count):
-    q_flags = ",".join(str(flag) for flag in explode_flags(flags))
-    q_promoted = "!=" if promoted else "="
+QUERY_RANDOM_NSFL = """
+    SELECT *
+    FROM items
+    WHERE id IN (
+      (
+        SELECT id
+        FROM random_items_nsfl TABLESAMPLE BERNOULLI(2)
+        WHERE promoted!=0
+        ORDER BY random() LIMIT 90)
+      UNION (
+        SELECT id
+        FROM random_items_nsfl TABLESAMPLE BERNOULLI(1)
+        WHERE promoted=0
+        ORDER BY random() LIMIT 30));
+"""
 
-    def query_with_tag(item_id):
-        cursor.execute("""SELECT items.*
-            FROM items INNER JOIN tags ON items.id=tags.item_id
-            WHERE items.id<=%%s AND lower(tags.tag)=%%s AND items.flags IN (%s) AND items.promoted %s 0
-            ORDER BY items.id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id, tags.lower()))
-
-    def query_simple(item_id):
-        cursor.execute("""SELECT * FROM items
-            WHERE items.id<=%%s AND items.flags IN (%s) AND items.promoted %s 0
-            ORDER BY items.id DESC LIMIT 1""" % (q_flags, q_promoted), (item_id,))
-
-    random_item_ids = sorted({random.randint(0, max_id) for _ in range(count)}, reverse=True)
-
-    min_possible_result = max(random_item_ids)
-    for rid in random_item_ids:
-        if rid > min_possible_result:
-            continue
-
-        # now perform the query
-        (query_with_tag if tags else query_simple)(rid)
-        items = [dict(item) for item in cursor]
-
-        # stop if we haven't found anything with a smaller id than this
-        if not items:
-            break
-
-        # yield the results!
-        for item in items:
-            min_possible_result = item["id"]
-            yield fix_username_column(item)
+QUERY_RANDOM_REST = """
+    (
+      SELECT *
+      FROM items TABLESAMPLE SYSTEM (0.5)
+      WHERE flags IN %(flags)s AND promoted!=0
+      ORDER BY random() LIMIT 90)
+    UNION (
+      SELECT *
+      FROM items TABLESAMPLE SYSTEM (0.1)
+      WHERE flags IN %(flags)s AND promoted=0
+      ORDER BY random() LIMIT 30)
+"""
 
 
-def unique(items, key_function=id):
-    keys = set()
-    for item in items:
-        key = key_function(item)
-        if key not in keys:
-            yield item
-            keys.add(key)
-
-
-def generate_item_feed_random(flags, tags):
-    start = time.time()
+def generate_item_feed_random(flags):
+    query = QUERY_RANDOM_NSFL if flags == 4 else QUERY_RANDOM_REST
     with dbpool.tx() as database, database.cursor() as cursor:
-        cursor.execute("SELECT MAX(id) FROM items")
-        max_id, = cursor.fetchone()
-        items = itertools.chain(
-                query_random_items(cursor, flags, max_id, tags, promoted=True, count=90),
-                query_random_items(cursor, flags, max_id, tags, promoted=False, count=30))
-
-        items = list(unique(items, itemgetter("id")))
+        cursor.execute(query, {"flags": explode_flags(flags)})
+        items = [fix_username_column(dict(row)) for row in cursor.fetchall()]
 
     random.shuffle(items)
     return items
@@ -177,11 +156,11 @@ def pg_tsquery(tag):
 thread_pool = ThreadPoolExecutor(4)
 
 
-@lru_cache_pool(thread_pool, 256)
+@lru_cache_pool(thread_pool, 8)
 @stats.timed(metric_name("random.update"))
-def process_request_random(flags, tags=None):
+def process_request_random(flags):
     return json.dumps({
-        "items": generate_item_feed_random(flags, tags),
+        "items": generate_item_feed_random(flags),
         "ts": time.time(),
         "atEnd": False, "atStart": True, "error": None, "cache": None, "rt": 1, "qc": 1
     })
@@ -214,15 +193,8 @@ def feed_random_cached():
     params = bottle.request.params.decode("utf8")
     flags = int(params.get("flags", "1"))
 
-    # tag_filter = params.get("tags")
-    tag_filter = None
-
-    if tag_filter:
-        tag_filter = tag_filter.lower().strip()
-        stats.increment(metric_name("random.request_tag"))
-
     bottle.response.content_type = "application/json"
-    return process_request_random(flags, tag_filter)
+    return process_request_random(flags)
 
 
 @bottle.get("/controversial")
