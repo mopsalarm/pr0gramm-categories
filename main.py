@@ -3,6 +3,7 @@ import os
 import random
 import re
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 import bottle
@@ -227,3 +228,38 @@ def feed_bestof_cached():
 @bottle.route("/ping")
 def ping():
     return
+
+
+def update_random_nsfl_view():
+    def update_once():
+        print("Updating random_items_nsfl view now.")
+        with dbpool.tx() as database, database.cursor() as cursor:
+            cursor.execute("""
+                -- create view with only nsfl posts
+                CREATE MATERIALIZED VIEW IF NOT EXISTS random_items_nsfl (id, promoted) AS (
+                  SELECT id, promoted FROM items WHERE flags=4);
+
+                -- to use "refresh view concurrently", we need a unique index on the id column
+                CREATE UNIQUE INDEX IF NOT EXISTS postgres_random_nsfl__id ON random_items_nsfl(id);
+
+                -- refresh the nsfl items.
+                REFRESH MATERIALIZED VIEW CONCURRENTLY random_items_nsfl;
+            """)
+
+            cursor.execute("SELECT COUNT(id) FROM random_items_nsfl")
+            nsfl_count = cursor.fetchone()[0]
+
+        print("We have {} nsfl items in the database".format(nsfl_count))
+
+    while True:
+        try:
+            update_once()
+        except KeyboardInterrupt:
+            raise
+        except:
+            traceback.print_exc()
+
+        time.sleep(6 * 3600)
+
+import threading
+threading.Thread(target=update_random_nsfl_view, daemon=True).start()
